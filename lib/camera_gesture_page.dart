@@ -9,6 +9,10 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:battery_plus/battery_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+enum GestureType { leftUp, rightUp, bothUp, wave }
+enum SensorType { gps, accelerometer, wifiRssi, battery, none }
 
 class CameraGesturePage extends StatefulWidget {
   const CameraGesturePage({super.key});
@@ -31,6 +35,14 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
   final _rightWristTracker = _WristWaveTracker();
   final _leftWristTracker = _WristWaveTracker();
 
+  // Gesture mapping (configurable)
+  final Map<GestureType, SensorType> _gestureMap = {
+    GestureType.leftUp: SensorType.gps,
+    GestureType.rightUp: SensorType.accelerometer,
+    GestureType.wave: SensorType.wifiRssi,
+    GestureType.bothUp: SensorType.battery,
+  };
+
   // Gesture edge/cooldown tracking
   bool _prevLeftUp = false;
   bool _prevRightUp = false;
@@ -46,6 +58,15 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
   static const _signalChannel = MethodChannel('com.example.gesture_inject/signal');
   final Battery _battery = Battery();
 
+  // Drawer + live sensor values
+  bool _drawerOpen = false;
+  Timer? _drawerTimer;
+  int _drawerTick = 0;
+  String _curGps = '—';
+  String _curAccel = '—';
+  String _curWifi = '—';
+  String _curBattery = '—';
+
   // Bubbles overlay
   final List<_Bubble> _bubbles = [];
   int _bubbleSeq = 0;
@@ -54,6 +75,7 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
   void initState() {
     super.initState();
     _init();
+    _loadGestureMap();
     // Start accelerometer stream (lightweight)
     _accelSub = accelerometerEventStream().listen((e) {
       _lastAccel = e;
@@ -62,6 +84,24 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
     () async {
       await Permission.locationWhenInUse.request();
     }();
+  }
+
+  Future<void> _loadGestureMap() async {
+    final prefs = await SharedPreferences.getInstance();
+    for (final g in GestureType.values) {
+      final key = _prefKeyForGesture(g);
+      final v = prefs.getString(key);
+      if (v != null) {
+        final sensor = _sensorFromKey(v);
+        if (sensor != null) _gestureMap[g] = sensor;
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _saveGestureMap(GestureType g, SensorType s) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefKeyForGesture(g), _sensorKey(s));
   }
 
   Future<void> _init() async {
@@ -205,7 +245,7 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
     final now = DateTime.now();
     if (now.difference(_lastBothFire) > _fireCooldown) {
       _lastBothFire = now;
-      _readBatteryAndBubble();
+      _triggerGesture(GestureType.bothUp);
     }
   }
 
@@ -213,7 +253,7 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
     final now = DateTime.now();
     if (leftUp && !_prevLeftUp && now.difference(_lastLeftFire) > _fireCooldown) {
       _lastLeftFire = now;
-      _readGpsAndBubble();
+      _triggerGesture(GestureType.leftUp);
     }
   }
 
@@ -221,7 +261,7 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
     final now = DateTime.now();
     if (rightUp && !_prevRightUp && now.difference(_lastRightFire) > _fireCooldown) {
       _lastRightFire = now;
-      _readAccelAndBubble();
+      _triggerGesture(GestureType.rightUp);
     }
   }
 
@@ -229,7 +269,28 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
     final now = DateTime.now();
     if (now.difference(_lastWaveFire) > _fireCooldown) {
       _lastWaveFire = now;
-      _readSignalAndBubble();
+      _triggerGesture(GestureType.wave);
+    }
+  }
+
+  void _triggerGesture(GestureType gesture) {
+    final sensor = _gestureMap[gesture] ?? SensorType.none;
+    switch (sensor) {
+      case SensorType.gps:
+        _readGpsAndBubble();
+        break;
+      case SensorType.accelerometer:
+        _readAccelAndBubble();
+        break;
+      case SensorType.wifiRssi:
+        _readSignalAndBubble();
+        break;
+      case SensorType.battery:
+        _readBatteryAndBubble();
+        break;
+      case SensorType.none:
+        // no-op
+        break;
     }
   }
 
@@ -246,6 +307,7 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
       );
       final lat = pos.latitude.toStringAsFixed(5);
       final lon = pos.longitude.toStringAsFixed(5);
+      _curGps = '$lat, $lon';
       _addBubble('GPS', '$lat, $lon', Icons.location_on);
     } catch (e) {
       _addBubble('GPS', 'chyba: ${e.runtimeType}', Icons.location_off);
@@ -259,15 +321,19 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
       return;
     }
     final mag = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
-    _addBubble('Akcelerometr', 'x:${a.x.toStringAsFixed(2)} y:${a.y.toStringAsFixed(2)} z:${a.z.toStringAsFixed(2)} | |a|:${mag.toStringAsFixed(2)}', Icons.sensors);
+    final v = 'x:${a.x.toStringAsFixed(2)} y:${a.y.toStringAsFixed(2)} z:${a.z.toStringAsFixed(2)} | |a|:${mag.toStringAsFixed(2)}';
+    _curAccel = v;
+    _addBubble('Akcelerometr', v, Icons.sensors);
   }
 
   Future<void> _readSignalAndBubble() async {
     try {
       final rssi = await _signalChannel.invokeMethod<int>('getWifiRssiDbm');
       if (rssi == null || rssi == 0 || rssi == -127) {
+        _curWifi = 'N/A';
         _addBubble('Signál', 'N/A', Icons.network_wifi);
       } else {
+        _curWifi = '$rssi dBm';
         _addBubble('Signál', '$rssi dBm', Icons.network_wifi);
       }
     } catch (e) {
@@ -278,6 +344,7 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
   Future<void> _readBatteryAndBubble() async {
     try {
       final level = await _battery.batteryLevel; // 0-100
+      _curBattery = '$level%';
       _addBubble('Baterie', '$level%', Icons.battery_full);
     } catch (_) {
       _addBubble('Baterie', 'N/A', Icons.battery_alert);
@@ -289,7 +356,7 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
     // Log to console for quick verification during runs (useful when device disconnects from debugger)
     // This helps confirm that gestures triggered and bubbles were created.
     // Keep lightweight to avoid impacting performance.
-    debugPrint('Bubble -> ' + title + ': ' + value);
+  debugPrint('Bubble -> $title: $value');
     final b = _Bubble(
       id: _bubbleSeq++,
       title: title,
@@ -467,6 +534,8 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
       appBar: AppBar(
         title: const Text('Gesta z kamery (ML Kit)'),
       ),
+      onDrawerChanged: _onDrawerChanged,
+      drawer: _buildDrawer(),
       body: _controller == null || !_controller!.value.isInitialized
           ? Center(child: Text(_status))
           : Stack(
@@ -515,6 +584,191 @@ class _CameraGesturePageState extends State<CameraGesturePage> {
               ],
             ),
     );
+  }
+
+  Drawer _buildDrawer() {
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Text('Senzory', style: Theme.of(context).textTheme.titleLarge),
+            ),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                children: [
+                  _sensorTile(icon: Icons.location_on, title: 'GPS', value: _curGps, onRefresh: _refreshGpsOnce),
+                  _sensorTile(icon: Icons.sensors, title: 'Akcelerometr', value: _curAccel, onRefresh: _refreshAccelOnce),
+                  _sensorTile(icon: Icons.network_wifi, title: 'Wi‑Fi RSSI', value: _curWifi, onRefresh: _refreshWifiOnce),
+                  _sensorTile(icon: Icons.battery_full, title: 'Baterie', value: _curBattery, onRefresh: _refreshBatteryOnce),
+
+                  const Divider(height: 24),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+                    child: Text('Konfigurace gest', style: Theme.of(context).textTheme.titleLarge),
+                  ),
+                  const SizedBox(height: 4),
+                  _gestureConfigRow('Levá ruka nahoře', GestureType.leftUp),
+                  _gestureConfigRow('Pravá ruka nahoře', GestureType.rightUp),
+                  _gestureConfigRow('Obě ruce nahoře', GestureType.bothUp),
+                  _gestureConfigRow('Mávání', GestureType.wave),
+                  const SizedBox(height: 24),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _sensorTile({required IconData icon, required String title, required String value, required VoidCallback onRefresh}) {
+    return Card(
+      child: ListTile(
+        leading: Icon(icon),
+        title: Text(title),
+        subtitle: Text(value),
+        trailing: IconButton(
+          icon: const Icon(Icons.refresh),
+          onPressed: onRefresh,
+          tooltip: 'Aktualizovat',
+        ),
+      ),
+    );
+  }
+
+  Widget _gestureConfigRow(String label, GestureType g) {
+    final current = _gestureMap[g] ?? SensorType.none;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: [
+            Expanded(child: Text(label)),
+            const SizedBox(width: 12),
+            DropdownButton<SensorType>(
+              value: current,
+              onChanged: (v) {
+                if (v == null) return;
+                setState(() => _gestureMap[g] = v);
+                _saveGestureMap(g, v);
+              },
+              items: SensorType.values.map((s) => DropdownMenuItem(
+                    value: s,
+                    child: Row(
+                      children: [Icon(_sensorIcon(s), size: 18), const SizedBox(width: 8), Text(_sensorLabel(s))],
+                    ),
+                  ))
+                  .toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _refreshWifiOnce() async {
+    try {
+      final rssi = await _signalChannel.invokeMethod<int>('getWifiRssiDbm');
+      setState(() => _curWifi = (rssi == null || rssi == 0 || rssi == -127) ? 'N/A' : '$rssi dBm');
+    } catch (_) {
+      setState(() => _curWifi = 'chyba');
+    }
+  }
+
+  void _refreshBatteryOnce() async {
+    try {
+      final lvl = await _battery.batteryLevel;
+      setState(() => _curBattery = '$lvl%');
+    } catch (_) {
+      setState(() => _curBattery = 'N/A');
+    }
+  }
+
+  void _refreshGpsOnce() async {
+    try {
+      final perm = await Permission.locationWhenInUse.request();
+      if (!perm.isGranted) {
+        setState(() => _curGps = 'povoleni zamitnuto');
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.low));
+      setState(() => _curGps = '${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}');
+    } catch (e) {
+      setState(() => _curGps = 'chyba');
+    }
+  }
+
+  void _refreshAccelOnce() {
+    final a = _lastAccel;
+    if (a == null) {
+      setState(() => _curAccel = 'žádná data');
+      return;
+    }
+    final mag = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    setState(() => _curAccel = 'x:${a.x.toStringAsFixed(2)} y:${a.y.toStringAsFixed(2)} z:${a.z.toStringAsFixed(2)} | |a|:${mag.toStringAsFixed(2)}');
+  }
+
+  void _onDrawerChanged(bool opened) {
+    _drawerOpen = opened;
+    _drawerTimer?.cancel();
+    if (opened) {
+      // Immediate refresh, then periodic lightweight updates
+      _refreshWifiOnce();
+      _refreshBatteryOnce();
+      _refreshGpsOnce();
+      _refreshAccelOnce();
+      _drawerTick = 0;
+      _drawerTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+        if (!_drawerOpen) return;
+        _drawerTick++;
+        _refreshWifiOnce();
+        _refreshAccelOnce();
+        if (_drawerTick % 3 == 0) {
+          _refreshGpsOnce();
+          _refreshBatteryOnce();
+        }
+      });
+    }
+  }
+
+  String _prefKeyForGesture(GestureType g) => 'map_${g.name}';
+  String _sensorKey(SensorType s) => s.name;
+  SensorType? _sensorFromKey(String k) {
+    return SensorType.values.firstWhere((e) => e.name == k, orElse: () => SensorType.none);
+  }
+
+  String _sensorLabel(SensorType s) {
+    switch (s) {
+      case SensorType.gps:
+        return 'GPS';
+      case SensorType.accelerometer:
+        return 'Akcelerometr';
+      case SensorType.wifiRssi:
+        return 'Wi‑Fi RSSI';
+      case SensorType.battery:
+        return 'Baterie';
+      case SensorType.none:
+        return 'Žádný';
+    }
+  }
+
+  IconData _sensorIcon(SensorType s) {
+    switch (s) {
+      case SensorType.gps:
+        return Icons.location_on;
+      case SensorType.accelerometer:
+        return Icons.sensors;
+      case SensorType.wifiRssi:
+        return Icons.network_wifi;
+      case SensorType.battery:
+        return Icons.battery_full;
+      case SensorType.none:
+        return Icons.block;
+    }
   }
 }
 

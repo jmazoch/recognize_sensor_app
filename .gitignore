@@ -43,3 +43,13 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Personal or machine-local artifacts
+bugreport-*.zip
+bugreport*.zip
+*.keystore
+*.jks
+*.pem
+*.p12
+*.pfx
+.env
